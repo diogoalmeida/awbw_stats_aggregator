@@ -7,6 +7,7 @@ from awbw_stats_aggregator.stats import (
     player_stats,
     plot_player_win_rates,
     plot_win_rate_table,
+    team_win_rates,
     win_rate_matrix,
 )
 
@@ -15,5 +16,6 @@ __all__ = [
     "player_stats",
     "plot_player_win_rates",
     "plot_win_rate_table",
+    "team_win_rates",
     "win_rate_matrix",
 ]

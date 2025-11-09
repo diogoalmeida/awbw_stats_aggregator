@@ -25,6 +25,7 @@ uv run -- jupyter notebook  # or any other command
 from awbw_stats_aggregator import (
     get_completed_games,
     player_stats,
+    team_win_rates,
     win_rate_matrix,
 )
 
@@ -44,7 +45,11 @@ head_to_head = player_stats(
 players = ["ExampleUser", "Rival123", "AnotherOpponent"]
 matrix = win_rate_matrix(games, players)
 
+# Team-vs-team win rates (e.g., 2v2 matchups)
+team_pairs = team_win_rates(games, players, team_size=2)
+
 print(overall)
 print(head_to_head)
 print(matrix)
+print(team_pairs)
 ```

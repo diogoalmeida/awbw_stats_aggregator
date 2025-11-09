@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from itertools import combinations
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,30 @@ class _HeadToHeadCount(BaseModel):
     player_b: str
     player_a_wins: int = 0
     player_b_wins: int = 0
+    draws: int = 0
+
+
+class _TeamIdentity(BaseModel):
+    """Represents a fixed-size team of players."""
+
+    model_config = ConfigDict(frozen=True)
+
+    members: tuple[_PlayerIdentity, ...]
+    normalized_members: tuple[str, ...]
+    label: str
+
+    @property
+    def member_set(self) -> set[str]:
+        return set(self.normalized_members)
+
+
+class _TeamHeadToHeadCount(BaseModel):
+    """Aggregated results between two teams."""
+
+    team_a: tuple[str, ...]
+    team_b: tuple[str, ...]
+    team_a_wins: int = 0
+    team_b_wins: int = 0
     draws: int = 0
 
 
@@ -243,6 +267,89 @@ def plot_win_rate_table(
     return plot_ax
 
 
+def team_win_rates(
+    games: Iterable[CompletedGame],
+    players: Iterable[str],
+    *,
+    team_size: int = 2,
+    min_days: int | None = None,
+) -> pd.DataFrame:
+    """Return win rates for every unique team pairing that actually occurs in games.
+
+    Parameters
+    ----------
+    games:
+        Completed game records to analyze.
+    players:
+        Iterable of player usernames to consider when forming teams.
+    team_size:
+        Number of players per team (default 2).
+    min_days:
+        Minimum day threshold to include games (matches shorter than this are ignored).
+
+    Returns
+    -------
+    pd.DataFrame
+        A dataframe with one row per disjoint team matchup, including match counts,
+        wins/losses/draws for each side, and win rates. Only matchups that occurred
+        in the provided games are included.
+    """
+
+    if team_size < 1:
+        raise ValueError("team_size must be at least 1")
+
+    identities = _normalize_players(players)
+    if len(identities) < team_size:
+        raise ValueError("Not enough players provided to form teams")
+
+    teams = _build_team_identities(identities, team_size)
+    if not teams:
+        raise ValueError("No valid teams could be constructed from provided players")
+
+    games_list = _filter_games_by_day(games, min_days)
+    counts = _aggregate_team_head_to_head(games_list, teams)
+
+    team_map = {team.normalized_members: team for team in teams}
+    rows: List[dict[str, object]] = []
+
+    for (team_a_norm, team_b_norm), record in counts.items():
+        team_a = team_map[team_a_norm]
+        team_b = team_map[team_b_norm]
+
+        matches = record.team_a_wins + record.team_b_wins + record.draws
+        if matches == 0:
+            continue
+
+        rows.append(
+            {
+                "team_a": team_a.label,
+                "team_b": team_b.label,
+                "matches": matches,
+                "team_a_wins": record.team_a_wins,
+                "team_b_wins": record.team_b_wins,
+                "draws": record.draws,
+                "team_a_win_rate": record.team_a_wins / matches,
+                "team_b_win_rate": record.team_b_wins / matches,
+                "draw_rate": record.draws / matches,
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "team_a",
+            "team_b",
+            "matches",
+            "team_a_wins",
+            "team_b_wins",
+            "draws",
+            "team_a_win_rate",
+            "team_b_win_rate",
+            "draw_rate",
+        ],
+    )
+
+
 def _summarize_results(
     games: Iterable[CompletedGame],
     player_username: str,
@@ -358,6 +465,24 @@ def _normalize_players(players: Iterable[str]) -> List[_PlayerIdentity]:
     return identities
 
 
+def _build_team_identities(
+    identities: Sequence[_PlayerIdentity],
+    team_size: int,
+) -> List[_TeamIdentity]:
+    teams: List[_TeamIdentity] = []
+    for combo in combinations(identities, team_size):
+        normalized_members = tuple(sorted(member.normalized for member in combo))
+        label = " & ".join(member.original for member in combo)
+        teams.append(
+            _TeamIdentity(
+                members=tuple(combo),
+                normalized_members=normalized_members,
+                label=label,
+            )
+        )
+    return teams
+
+
 def _aggregate_head_to_head(
     games: Iterable[CompletedGame],
     identity_map: Dict[str, _PlayerIdentity],
@@ -398,6 +523,81 @@ def _aggregate_head_to_head(
                 record.draws += 1
 
     return counts
+
+
+def _aggregate_team_head_to_head(
+    games: Iterable[CompletedGame],
+    teams: Sequence[_TeamIdentity],
+) -> Dict[tuple[tuple[str, ...], tuple[str, ...]], _TeamHeadToHeadCount]:
+    counts: Dict[tuple[tuple[str, ...], tuple[str, ...]], _TeamHeadToHeadCount] = {}
+    relevant_players = {
+        normalized for team in teams for normalized in team.normalized_members
+    }
+
+    for game in games:
+        players_in_game: Dict[str, CompletedGamePlayer] = {}
+        for participant in game.players:
+            normalized = _normalize(participant.username)
+            if normalized in relevant_players:
+                players_in_game[normalized] = participant
+
+        if len(players_in_game) < 2:
+            continue
+
+        for team_a, team_b in combinations(teams, 2):
+            if team_a.member_set & team_b.member_set:
+                continue
+
+            members_a = [
+                players_in_game.get(normalized)
+                for normalized in team_a.normalized_members
+            ]
+            if any(member is None for member in members_a):
+                continue
+
+            members_b = [
+                players_in_game.get(normalized)
+                for normalized in team_b.normalized_members
+            ]
+            if any(member is None for member in members_b):
+                continue
+
+            team_name_a = _shared_team_name(members_a)
+            team_name_b = _shared_team_name(members_b)
+
+            if not team_name_a or not team_name_b:
+                continue
+            if team_name_a == team_name_b:
+                continue
+
+            team_a_won = any(member.is_winner for member in members_a)
+            team_b_won = any(member.is_winner for member in members_b)
+
+            key = (team_a.normalized_members, team_b.normalized_members)
+            record = counts.get(key)
+            if record is None:
+                record = _TeamHeadToHeadCount(
+                    team_a=team_a.normalized_members, team_b=team_b.normalized_members
+                )
+                counts[key] = record
+
+            if team_a_won and team_b_won:
+                record.draws += 1
+            elif team_a_won:
+                record.team_a_wins += 1
+            elif team_b_won:
+                record.team_b_wins += 1
+            else:
+                record.draws += 1
+
+    return counts
+
+
+def _shared_team_name(players: Sequence[CompletedGamePlayer]) -> Optional[str]:
+    team_names = {_normalize(player.team) for player in players if player.team}
+    if len(team_names) != 1:
+        return None
+    return next(iter(team_names))
 
 
 def _pick_opponent_on_other_team(
