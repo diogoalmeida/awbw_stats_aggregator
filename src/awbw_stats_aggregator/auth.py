@@ -79,5 +79,3 @@ def authenticate(username: str, password: str) -> AWBWAuthResult:
         raise AWBWLoginError(payload or "Unknown login failure")
 
     return AWBWAuthResult(session=session, message="Login successful")
-
-

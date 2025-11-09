@@ -9,7 +9,11 @@ from urllib.parse import parse_qs, urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup, Tag
 from pydantic import BaseModel, Field
-from awbw_stats_aggregator.lookups import co_name_from_path, country_from_image, team_from_image
+from awbw_stats_aggregator.lookups import (
+    co_name_from_path,
+    country_from_image,
+    team_from_image,
+)
 
 
 BASE_URL = "https://awbw.amarriner.com/"
@@ -69,7 +73,9 @@ def get_completed_games(
     try:
         while True:
             params = {"username": username, "start": start}
-            resp = sess.get(urljoin(BASE_URL, COMPLETED_GAMES_PATH), params=params, timeout=15)
+            resp = sess.get(
+                urljoin(BASE_URL, COMPLETED_GAMES_PATH), params=params, timeout=15
+            )
             resp.raise_for_status()
 
             parsed = _parse_completed_games_page(resp.text)
@@ -103,7 +109,9 @@ def _parse_completed_games_page(html: str) -> List[CompletedGame]:
 
 
 def _parse_game(anchor: Tag, next_anchor: Optional[Tag]) -> CompletedGame:
-    game_link = anchor.find_next_sibling("a", href=lambda s: s and "game.php?games_id=" in s)
+    game_link = anchor.find_next_sibling(
+        "a", href=lambda s: s and "game.php?games_id=" in s
+    )
     if game_link is None:
         raise ValueError("Unable to locate game link for anchor", anchor)
 
@@ -119,15 +127,33 @@ def _parse_game(anchor: Tag, next_anchor: Optional[Tag]) -> CompletedGame:
 
     for elem in _iter_between(anchor, next_anchor):
         if isinstance(elem, Tag):
-            if map_info == (0, "", "", "") and elem.name == "a" and elem.get("href") and "prevmaps.php" in elem["href"]:
+            if (
+                map_info == (0, "", "", "")
+                and elem.name == "a"
+                and elem.get("href")
+                and "prevmaps.php" in elem["href"]
+            ):
                 map_info = _parse_map_link(elem)
-            elif elem.name == "a" and elem.get("href") and "game.php" in elem["href"] and "ndx=" in elem["href"]:
+            elif (
+                elem.name == "a"
+                and elem.get("href")
+                and "game.php" in elem["href"]
+                and "ndx=" in elem["href"]
+            ):
                 replay_url = urljoin(BASE_URL, elem["href"])
-            elif day == 0 and elem.name == "b" and elem.get_text(strip=True).startswith("Day"):
+            elif (
+                day == 0
+                and elem.name == "b"
+                and elem.get_text(strip=True).startswith("Day")
+            ):
                 parsed_day = _parse_day(elem.get_text(strip=True))
                 if parsed_day is not None:
                     day = parsed_day
-            elif ended_on == datetime.min and elem.name == "span" and "Ended on" in elem.get_text():
+            elif (
+                ended_on == datetime.min
+                and elem.name == "span"
+                and "Ended on" in elem.get_text()
+            ):
                 parsed_date = _parse_date(elem.get_text(strip=True))
                 if parsed_date is not None:
                     ended_on = parsed_date
@@ -163,7 +189,9 @@ def _extract_query_int(url: str, key: str) -> int:
     try:
         return int(parse_qs(parsed.query)[key][0])
     except (KeyError, IndexError, ValueError) as exc:  # pragma: no cover - defensive
-        raise ValueError(f"Could not extract integer query param '{key}' from {url}") from exc
+        raise ValueError(
+            f"Could not extract integer query param '{key}' from {url}"
+        ) from exc
 
 
 def _extract_game_name(link: Tag) -> str:
@@ -214,9 +242,9 @@ def _parse_player(container: Tag) -> CompletedGamePlayer:
     username = username_anchor.get_text(strip=True)
     profile_url = urljoin(BASE_URL, username_anchor["href"])
 
-    is_winner = bool(container.select_one('.do-game-co-image img[title="Winner"]')) or bool(
-        username_anchor.find("b")
-    )
+    is_winner = bool(
+        container.select_one('.do-game-co-image img[title="Winner"]')
+    ) or bool(username_anchor.find("b"))
 
     extras = container.find("div", class_="do-game-extras")
     status_text = ""
@@ -226,7 +254,9 @@ def _parse_player(container: Tag) -> CompletedGamePlayer:
         status_span = extras.find("span", class_="game-tools-btn-text")
         if status_span:
             status_text = status_span.get_text(strip=True)
-        indicator_span = extras.find("span", class_=lambda c: c and c.startswith("dot_"))
+        indicator_span = extras.find(
+            "span", class_=lambda c: c and c.startswith("dot_")
+        )
         if indicator_span and indicator_span.get("class"):
             for cls in indicator_span["class"]:
                 if cls.startswith("dot_"):
@@ -241,8 +271,16 @@ def _parse_player(container: Tag) -> CompletedGamePlayer:
     co_name = co_name_from_path(co_img["src"]) if co_img and co_img.get("src") else ""
 
     country_img = container.select_one(".do-game-country-logo img")
-    country_image = urljoin(BASE_URL, country_img["src"]) if country_img and country_img.get("src") else ""
-    country = country_from_image(country_img["src"]) if country_img and country_img.get("src") else ""
+    country_image = (
+        urljoin(BASE_URL, country_img["src"])
+        if country_img and country_img.get("src")
+        else ""
+    )
+    country = (
+        country_from_image(country_img["src"])
+        if country_img and country_img.get("src")
+        else ""
+    )
 
     return CompletedGamePlayer(
         username=username,
@@ -256,5 +294,3 @@ def _parse_player(container: Tag) -> CompletedGamePlayer:
         country=country,
         country_image=country_image,
     )
-
-

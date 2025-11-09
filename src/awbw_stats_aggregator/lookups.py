@@ -64,5 +64,3 @@ def country_from_image(src: str) -> str:
     filename = urlparse(src).path.split("/")[-1]
     key = filename.split(".")[0]
     return COUNTRY_MAP.get(key, key.replace("_", " ").title())
-
-
