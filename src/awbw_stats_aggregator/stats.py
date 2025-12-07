@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Iterable
 from itertools import combinations
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Literal
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,9 @@ from matplotlib.axes import Axes
 from pydantic import BaseModel, ConfigDict
 
 from awbw_stats_aggregator.completed_games import CompletedGame, CompletedGamePlayer
+
+
+BASE_TEAM_ELO = 1600.0
 
 
 class _PlayerMatchResult(BaseModel):
@@ -348,6 +351,286 @@ def team_win_rates(
             "draw_rate",
         ],
     )
+
+
+def team_elo(
+    games: Iterable[CompletedGame],
+    players: Iterable[str],
+    *,
+    team_size: int = 2,
+    min_days: int | None = None,
+    base_rating: float = BASE_TEAM_ELO,
+    k_factor: float = 32.0,
+    scale: float = 400.0,
+    team_rating_fn=np.mean,
+    round_mode: Literal["none", "nearest"] = "none",
+) -> pd.DataFrame:
+    """Track Elo ratings for each player in team games on a game-by-game basis.
+
+    Only games with exactly two teams of ``team_size`` composed entirely of the
+    provided players are included. Ratings are updated in chronological order.
+    """
+
+    if team_size < 1:
+        raise ValueError("team_size must be at least 1")
+    identities = _normalize_players(players)
+    if len(identities) < team_size * 2:
+        raise ValueError("Not enough players provided to form two teams")
+
+    tracked = {identity.normalized: identity for identity in identities}
+    ratings: Dict[str, float] = {identity.normalized: base_rating for identity in identities}
+
+    games_list = sorted(
+        _filter_games_by_day(games, min_days),
+        key=lambda g: (g.ended_on, g.day, g.game_id),
+    )
+
+    rows: List[dict[str, object]] = []
+
+    for game in games_list:
+        matchup = _extract_tracked_teams(game, tracked, team_size)
+        if matchup is None:
+            continue
+        team_a, team_b = matchup
+        team_a_norms = tuple(_normalize(player.username) for player in team_a)
+        team_b_norms = tuple(_normalize(player.username) for player in team_b)
+
+        rating_a = float(team_rating_fn([ratings[norm] for norm in team_a_norms]))
+        rating_b = float(team_rating_fn([ratings[norm] for norm in team_b_norms]))
+
+        expected_a = 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / scale))
+        expected_b = 1.0 - expected_a
+
+        score_a = _team_score(team_a, team_b)
+        score_b = 1.0 - score_a if score_a in (0.0, 1.0) else 0.5
+
+        def _expected_per_player(
+            player_norm: str, opponent_members: tuple[str, ...]
+        ) -> float:
+            player_rating = ratings[player_norm]
+            opponent_rating = float(
+                team_rating_fn([ratings[norm] for norm in opponent_members])
+            )
+            return 1.0 / (1.0 + 10 ** ((opponent_rating - player_rating) / scale))
+
+        def _record_updates(
+            members: tuple[str, ...],
+            opponents: tuple[str, ...],
+            team_score: float,
+        ) -> None:
+            for norm in members:
+                before = ratings[norm]
+                expected_player = _expected_per_player(norm, opponents)
+                # AoE2-style Elo: R2 = R1 + K * (S - E)
+                player_score = 1.0 if team_score == 1.0 else 0.0 if team_score == 0.0 else 0.5
+                delta = k_factor * (player_score - expected_player)
+                after = _apply_round(before + delta, round_mode)
+                ratings[norm] = after
+                rows.append(
+                    {
+                        "player": tracked[norm].original,
+                        "game_id": game.game_id,
+                        "day": game.day,
+                        "ended_on": game.ended_on,
+                        "rating_before": before,
+                        "rating_after": after,
+                        "result": "win"
+                        if team_score == 1.0
+                        else "loss"
+                        if team_score == 0.0
+                        else "draw",
+                        "team": _shared_team_name(
+                            team_a if norm in team_a_norms else team_b
+                        ),
+                        "teammates": ", ".join(
+                            tracked[n].original for n in members if n != norm
+                        ),
+                        "opponents": ", ".join(tracked[n].original for n in opponents),
+                    }
+                )
+
+        _record_updates(team_a_norms, team_b_norms, score_a)
+        _record_updates(team_b_norms, team_a_norms, score_b)
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "player",
+            "game_id",
+            "day",
+            "ended_on",
+            "rating_before",
+            "rating_after",
+            "result",
+            "team",
+            "teammates",
+            "opponents",
+        ],
+    )
+
+
+def team_combo_elo(
+    games: Iterable[CompletedGame],
+    players: Iterable[str],
+    *,
+    team_size: int = 2,
+    min_days: int | None = None,
+    base_rating: float = BASE_TEAM_ELO,
+    k_factor: float = 32.0,
+    scale: float = 400.0,
+    team_rating_fn=np.mean,
+    round_mode: Literal["none", "nearest"] = "none",
+) -> pd.DataFrame:
+    """Track Elo for each distinct team (combination of players) over time.
+
+    Each unique team of size ``team_size`` that appears in qualifying games gets
+    its own rating, updated per game using standard Elo between the two teams.
+    """
+
+    if team_size < 1:
+        raise ValueError("team_size must be at least 1")
+    identities = _normalize_players(players)
+    if len(identities) < team_size * 2:
+        raise ValueError("Not enough players provided to form two teams")
+
+    tracked = {identity.normalized: identity for identity in identities}
+    team_ratings: Dict[tuple[str, ...], float] = {}
+
+    games_list = sorted(
+        _filter_games_by_day(games, min_days),
+        key=lambda g: (g.ended_on, g.day, g.game_id),
+    )
+
+    def _team_label(norm_members: tuple[str, ...]) -> str:
+        originals = [tracked[norm].original for norm in norm_members]
+        return " & ".join(sorted(originals))
+
+    rows: List[dict[str, object]] = []
+
+    for game in games_list:
+        matchup = _extract_tracked_teams(game, tracked, team_size)
+        if matchup is None:
+            continue
+        team_a, team_b = matchup
+        team_a_norms = tuple(sorted(_normalize(player.username) for player in team_a))
+        team_b_norms = tuple(sorted(_normalize(player.username) for player in team_b))
+
+        rating_a = team_ratings.get(team_a_norms, base_rating)
+        rating_b = team_ratings.get(team_b_norms, base_rating)
+
+        expected_a = 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / scale))
+        expected_b = 1.0 - expected_a
+
+        score_a = _team_score(team_a, team_b)
+        score_b = 1.0 - score_a if score_a in (0.0, 1.0) else 0.5
+
+        rating_a_after = _apply_round(rating_a + k_factor * (score_a - expected_a), round_mode)
+        rating_b_after = _apply_round(rating_b + k_factor * (score_b - expected_b), round_mode)
+
+        team_ratings[team_a_norms] = rating_a_after
+        team_ratings[team_b_norms] = rating_b_after
+
+        rows.extend(
+            [
+                {
+                    "team": _team_label(team_a_norms),
+                    "members": ", ".join(tracked[n].original for n in team_a_norms),
+                    "opponents": _team_label(team_b_norms),
+                    "game_id": game.game_id,
+                    "day": game.day,
+                    "ended_on": game.ended_on,
+                    "rating_before": rating_a,
+                    "rating_after": rating_a_after,
+                    "result": "win"
+                    if score_a == 1.0
+                    else "loss"
+                    if score_a == 0.0
+                    else "draw",
+                },
+                {
+                    "team": _team_label(team_b_norms),
+                    "members": ", ".join(tracked[n].original for n in team_b_norms),
+                    "opponents": _team_label(team_a_norms),
+                    "game_id": game.game_id,
+                    "day": game.day,
+                    "ended_on": game.ended_on,
+                    "rating_before": rating_b,
+                    "rating_after": rating_b_after,
+                    "result": "win"
+                    if score_b == 1.0
+                    else "loss"
+                    if score_b == 0.0
+                    else "draw",
+                },
+            ]
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "team",
+            "members",
+            "opponents",
+            "game_id",
+            "day",
+            "ended_on",
+            "rating_before",
+            "rating_after",
+            "result",
+        ],
+    )
+
+
+def _extract_tracked_teams(
+    game: CompletedGame,
+    tracked: Dict[str, _PlayerIdentity],
+    team_size: int,
+) -> Optional[tuple[List[CompletedGamePlayer], List[CompletedGamePlayer]]]:
+    grouped: Dict[str, List[CompletedGamePlayer]] = {}
+    for participant in game.players:
+        normalized_player = _normalize(participant.username)
+        if normalized_player not in tracked:
+            continue
+        normalized_team = _normalize(participant.team)
+        if not normalized_team:
+            return None
+        grouped.setdefault(normalized_team, []).append(participant)
+
+    if len(grouped) != 2:
+        return None
+
+    teams = list(grouped.values())
+    if any(len(team) != team_size for team in teams):
+        return None
+
+    # Ensure all tracked participants in the game are part of these two teams.
+    seen_players = { _normalize(p.username) for team in teams for p in team }
+    tracked_in_game = { _normalize(p.username) for p in game.players if _normalize(p.username) in tracked }
+    if seen_players != tracked_in_game:
+        return None
+
+    return teams[0], teams[1]
+
+
+def _team_score(
+    team_a: Sequence[CompletedGamePlayer],
+    team_b: Sequence[CompletedGamePlayer],
+) -> float:
+    team_a_won = any(member.is_winner for member in team_a)
+    team_b_won = any(member.is_winner for member in team_b)
+    if team_a_won and team_b_won:
+        return 0.5
+    if team_a_won:
+        return 1.0
+    if team_b_won:
+        return 0.0
+    return 0.5
+
+
+def _apply_round(value: float, round_mode: Literal["none", "nearest"]) -> float:
+    if round_mode == "nearest":
+        return float(round(value))
+    return value
 
 
 def _summarize_results(
