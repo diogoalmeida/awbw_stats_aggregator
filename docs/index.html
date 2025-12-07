@@ -115,13 +115,6 @@
         ["Generated at", generatedAt],
         ["Username", params.username],
         ["Players", params.players.join(", ")],
-        ["Team size", params.team_size],
-        ["min_days", params.min_days],
-        ["max_pages", params.max_pages],
-        ["k_factor", params.k_factor],
-        ["scale", params.scale],
-        ["round_mode", params.round_mode],
-        ["base_rating", params.base_rating],
       ];
       const rows = list.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
       el.innerHTML = `<table><tbody>${rows}</tbody></table>`;
@@ -134,17 +127,10 @@
         renderTable("player-table", data.latest_player_elo, [
           { key: "player", label: "Player" },
           { key: "rating_after", label: "Elo" },
-          { key: "game_id", label: "Game ID" },
-          { key: "day", label: "Day" },
-          { key: "ended_on", label: "Ended On" },
         ]);
         renderTable("team-table", data.latest_team_elo, [
           { key: "team", label: "Team" },
-          { key: "members", label: "Members" },
           { key: "rating_after", label: "Elo" },
-          { key: "game_id", label: "Game ID" },
-          { key: "day", label: "Day" },
-          { key: "ended_on", label: "Ended On" },
         ]);
         renderChart("playerChart", data.player_series || [], "Player Elo progression");
         renderChart("teamChart", data.team_series || [], "Team Elo progression");
