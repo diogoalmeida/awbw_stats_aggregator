@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Literal
 
@@ -151,13 +151,13 @@ def main() -> None:
 
     latest_players = _latest_by_group(elo_df, "player", "rating_after")[
         ["player", "rating_after", "game_id", "day", "ended_on"]
-    ]
+    ].assign(ended_on=lambda df: df["ended_on"].map(_datetime_to_str))
     latest_teams = _latest_by_group(team_elo_df, "team", "rating_after")[
         ["team", "members", "rating_after", "game_id", "day", "ended_on"]
-    ]
+    ].assign(ended_on=lambda df: df["ended_on"].map(_datetime_to_str))
 
     data = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "params": {
             "username": args.username,
             "players": args.players,
