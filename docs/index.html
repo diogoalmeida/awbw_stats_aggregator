@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AWBW Team Elo Dashboard</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/sakura.css/css/sakura.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    .chart-container {
+      position: relative;
+      width: 100%;
+      max-width: 900px;
+      margin: 1.5rem 0;
+    }
+    table {
+      width: 100%;
+      overflow-x: auto;
+    }
+    code {
+      background: #f4f4f4;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <h1>AWBW Team Elo Dashboard</h1>
+  <p>
+    Data generated from <code>awbw_stats_aggregator</code>. Update by running
+    <code>python scripts/export_site_data.py ...</code> or via the GitHub Actions workflow.
+  </p>
+
+  <section id="metadata"></section>
+
+  <h2>Latest Player Elo</h2>
+  <div id="player-table"></div>
+
+  <h2>Latest Team Elo</h2>
+  <div id="team-table"></div>
+
+  <h2>Elo Progression – Players</h2>
+  <div class="chart-container"><canvas id="playerChart"></canvas></div>
+
+  <h2>Elo Progression – Teams</h2>
+  <div class="chart-container"><canvas id="teamChart"></canvas></div>
+
+  <script>
+    async function loadData() {
+      const res = await fetch("data/elo.json", { cache: "no-cache" });
+      if (!res.ok) throw new Error("Failed to load data/elo.json");
+      return res.json();
+    }
+
+    function renderTable(containerId, rows, columns) {
+      const container = document.getElementById(containerId);
+      if (!rows || !rows.length) {
+        container.innerHTML = "<p>No data.</p>";
+        return;
+      }
+      const headers = columns.map(c => `<th>${c.label}</th>`).join("");
+      const body = rows
+        .map(row => {
+          const cells = columns
+            .map(c => `<td>${row[c.key] ?? ""}</td>`)
+            .join("");
+          return `<tr>${cells}</tr>`;
+        })
+        .join("");
+      container.innerHTML = `<table><thead><tr>${headers}</tr></thead><tbody>${body}</tbody></table>`;
+    }
+
+    function toDatasets(series) {
+      const palette = [
+        "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",
+        "#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"
+      ];
+      return series.map((s, idx) => ({
+        label: s.player || s.team,
+        data: s.points.map(p => ({ x: p.game_index, y: p.rating })),
+        borderColor: palette[idx % palette.length],
+        tension: 0.15,
+        fill: false,
+        pointRadius: 3,
+      }));
+    }
+
+    function renderChart(canvasId, series, title) {
+      const ctx = document.getElementById(canvasId).getContext("2d");
+      new Chart(ctx, {
+        type: "line",
+        data: { datasets: toDatasets(series) },
+        options: {
+          responsive: true,
+          interaction: { mode: "nearest", intersect: false },
+          plugins: {
+            title: { display: true, text: title },
+            legend: { position: "bottom" },
+          },
+          scales: {
+            x: {
+              type: "linear",
+              title: { display: true, text: "Game number" },
+              ticks: { stepSize: 1, precision: 0 },
+            },
+            y: { title: { display: true, text: "Elo" } },
+          },
+        },
+      });
+    }
+
+    function renderMetadata(params, generatedAt) {
+      const el = document.getElementById("metadata");
+      const list = [
+        ["Generated at", generatedAt],
+        ["Username", params.username],
+        ["Players", params.players.join(", ")],
+        ["Team size", params.team_size],
+        ["min_days", params.min_days],
+        ["max_pages", params.max_pages],
+        ["k_factor", params.k_factor],
+        ["scale", params.scale],
+        ["round_mode", params.round_mode],
+        ["base_rating", params.base_rating],
+      ];
+      const rows = list.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("");
+      el.innerHTML = `<table><tbody>${rows}</tbody></table>`;
+    }
+
+    (async () => {
+      try {
+        const data = await loadData();
+        renderMetadata(data.params, data.generated_at);
+        renderTable("player-table", data.latest_player_elo, [
+          { key: "player", label: "Player" },
+          { key: "rating_after", label: "Elo" },
+          { key: "game_id", label: "Game ID" },
+          { key: "day", label: "Day" },
+          { key: "ended_on", label: "Ended On" },
+        ]);
+        renderTable("team-table", data.latest_team_elo, [
+          { key: "team", label: "Team" },
+          { key: "members", label: "Members" },
+          { key: "rating_after", label: "Elo" },
+          { key: "game_id", label: "Game ID" },
+          { key: "day", label: "Day" },
+          { key: "ended_on", label: "Ended On" },
+        ]);
+        renderChart("playerChart", data.player_series || [], "Player Elo progression");
+        renderChart("teamChart", data.team_series || [], "Team Elo progression");
+      } catch (err) {
+        document.body.innerHTML = `<h2>Error loading data</h2><pre>${err}</pre>`;
+        console.error(err);
+      }
+    })();
+  </script>
+</body>
+</html>
+
